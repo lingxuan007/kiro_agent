@@ -1,6 +1,6 @@
 ### Windows 微星主机
-cd C:\Users\Murra\Desktop\code\kiro\kiro_agent
-git pull origin main
+    # cd C:\Users\Murra\Desktop\code\kiro\kiro_agent
+    # git pull origin main
 
 
     # git branch
