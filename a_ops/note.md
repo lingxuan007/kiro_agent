@@ -1,9 +1,9 @@
-Kiro Assistant (智能助理示例)
+# PCS交互式专家智能体
 
-这是目前最全、质量最高的综合性示例，展示了 Kiro 如何从一个简单的 AI 变成一个“全能同事”。
+## 如何用 Kiro 把 AWS HPC(Parallel Computing Service) 专家知识，工程化为一个可交互的 AI Agent。
 
-GitHub 地址： aws-samples/sample-kiro-assistant
+- GitHub 地址： aws-samples/sample-pcs-kiro-agent
 
-推荐理由： 它不仅仅是代码，更是一套插件系统（Powers）。你可以在这里学习如何让 Kiro 处理 Excel 建模、制作演示文稿甚至调用外部工具。
+- 推荐理由： 它展示了如何构建一个“专家级”的智能体。它不是泛泛而谈，而是深入到具体的配置逻辑（如集群配置、性能推荐）。
 
-学习点： 观察它如何通过 bun run dev 进行迭代，以及它是如何利用 MCP (Model Context Protocol) 集成 500 多个外部工具的。
+- 学习 .kiro/agents 文件夹下的配置。你可以参考它，为你的量化系统定义一个“量化策略审计专家”或“数据清洗监控专家”。

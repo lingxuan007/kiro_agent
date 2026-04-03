@@ -1,22 +1,18 @@
 ### Windows 微星主机
-
-# cd C:\Users\Murra\Desktop\code\kiro\kiro_agent
+cd C:\Users\Murra\Desktop\code\kiro\kiro_agent
 git pull origin main
-# git init    # 开始初始化
-# git remote add origin git@github.com:lingxuan007/kiro_agent.git    # 添加远程仓库
-
-# git branch  # 查看分支
-# git branch -m windows_git        # 重命名分支
 
 
-
+    # git branch
+    # git branch -m windows_git        # 重命名分支
 
 cd C:\Users\Murra\Desktop\code\kiro\kiro_agent
-git add --all .                          # 将文件添加到暂存区
-git commit -m "windows-微星"             # 提交更改
-git push -u origin windows_git:main      # 推送
+git add --all .      
+git commit -m "windows-微星"
+git push -u origin windows_git:main
 
 
-
+    # git init
+    # git remote add origin git@github.com:lingxuan007/kiro_agent.git
 ##################
 
