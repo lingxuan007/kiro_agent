@@ -1,0 +1,694 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Complete AWS PCS cluster with VPC, security groups, FSx Lustre storage, launch templates, and compute resources
+
+Parameters:
+  # Networking Parameters
+  CidrBlock:
+    AllowedPattern: '((\d{1,3})\.){3}\d{1,3}/\d{1,2}'
+    Default: 10.3.0.0/16
+    Description: VPC CIDR Block (eg 10.3.0.0/16)
+    Type: String
+  CidrPublicSubnetA:
+    AllowedPattern: '((\d{1,3})\.){3}\d{1,3}/\d{1,2}'
+    Default: 10.3.0.0/20
+    Description: VPC CIDR Block for the Public Subnet A
+    Type: String
+  CidrPrivateSubnetA:
+    AllowedPattern: '((\d{1,3})\.){3}\d{1,3}/\d{1,2}'
+    Default: 10.3.32.0/20
+    Description: VPC CIDR Block for the Private Subnet A
+    Type: String
+
+  # Security Parameters
+  ClientIpCidr:
+    Description: IP address(s) allowed to connect to nodes using SSH. IMPORTANT - Change this to your organization's IP range before deployment!
+    Default: '10.0.0.0/8'
+    Type: String
+    AllowedPattern: (\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})/(\d{1,2})
+    ConstraintDescription: Value must be a valid IP or network range of the form x.x.x.x/x.
+  
+  # KMS Key for Encryption
+  KmsKeyId:
+    Description: (Optional) KMS Key ID for FSx Lustre encryption. Leave empty to use AWS managed key.
+    Type: String
+    Default: ''
+
+  # FSx Parameters
+  FSxCapacity:
+    Type: Number
+    Default: 1200
+    Description: Storage capacity in GiB
+    MinValue: 1200
+    MaxValue: 100800
+  FSxPerUnitStorageThroughput:
+    Type: Number
+    Default: 125
+    Description: Per unit storage throughput in MB/s/TiB
+    AllowedValues: [125, 250, 500, 1000]
+
+  # PCS Parameters
+  SlurmVersion:
+    Type: String
+    Default: '25.05'
+    Description: Version of Slurm to use
+    AllowedValues: ['24.11', '25.05']
+  KeyName:
+    Description: SSH keypair to connect to the login node
+    Type: AWS::EC2::KeyPair::KeyName
+  NodeArchitecture:
+    Type: String
+    Default: x86
+    AllowedValues: [x86, Graviton]
+    Description: Processor architecture for the login and compute node instances
+
+Conditions:
+  IsGovCloud: !Equals [!Sub '${AWS::Partition}', 'aws-us-gov']
+  HasKmsKey: !Not [!Equals [!Ref KmsKeyId, '']]
+
+Mappings:
+  Architecture:
+    AmiArchParameter:
+      Graviton: arm64
+      x86: x86_64
+    LoginNodeInstances:
+      Graviton: c7g.xlarge
+      x86: c6i.xlarge
+    ComputeNodeInstances:
+      Graviton: c7g.xlarge
+      x86: c6i.xlarge
+
+Resources:
+  # VPC and Networking Resources
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref CidrBlock
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-VPC'
+
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref CidrPublicSubnetA
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-PublicSubnetA'
+
+  PrivateSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref CidrPrivateSubnetA
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-PrivateSubnetA'
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-IGW'
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  NATGatewayEIP:
+    Type: AWS::EC2::EIP
+    DependsOn: AttachGateway
+    Properties:
+      Domain: vpc
+
+  NATGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NATGatewayEIP.AllocationId
+      SubnetId: !Ref PublicSubnetA
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-NAT'
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-PublicRT'
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-PrivateRT'
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PrivateRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NATGateway
+
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetA
+      RouteTableId: !Ref PublicRouteTable
+
+  PrivateSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetA
+      RouteTableId: !Ref PrivateRouteTable
+
+  # VPC Flow Logs for network monitoring
+  VPCFlowLogsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: vpc-flow-logs.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CloudWatchLogPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogGroups
+                  - logs:DescribeLogStreams
+                Resource: !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/vpc/flowlogs/${AWS::StackName}:*'
+
+  VPCFlowLogsLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/vpc/flowlogs/${AWS::StackName}'
+      RetentionInDays: 7
+
+  VPCFlowLog:
+    Type: AWS::EC2::FlowLog
+    Properties:
+      ResourceType: VPC
+      ResourceId: !Ref VPC
+      TrafficType: ALL
+      LogDestinationType: cloud-watch-logs
+      LogGroupName: !Ref VPCFlowLogsLogGroup
+      DeliverLogsPermissionArn: !GetAtt VPCFlowLogsRole.Arn
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-vpc-flow-logs'
+
+  # Security Groups
+  ClusterSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub '${AWS::StackName}-cluster-sg'
+      GroupDescription: Security group for PCS cluster communication
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: -1
+          CidrIp: !Ref CidrBlock
+          Description: Allow all traffic from VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-cluster-sg'
+
+  # Self-referencing security group rules for cluster communication
+  ClusterSecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref ClusterSecurityGroup
+      IpProtocol: tcp
+      FromPort: 6817
+      ToPort: 6818
+      SourceSecurityGroupId: !Ref ClusterSecurityGroup
+      Description: Slurm communication within cluster
+
+  # Allow all traffic within cluster security group
+  ClusterSecurityGroupIngressAll:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref ClusterSecurityGroup
+      IpProtocol: -1
+      SourceSecurityGroupId: !Ref ClusterSecurityGroup
+      Description: All traffic within cluster
+
+  InboundSshSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub '${AWS::StackName}-ssh-sg'
+      GroupDescription: Security group for SSH access
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref ClientIpCidr
+          Description: SSH access from specified CIDR
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-ssh-sg'
+
+  # FSx Lustre Security Group
+  FSxLustreSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub '${AWS::StackName}-fsx-sg'
+      GroupDescription: Security group for FSx Lustre access
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-fsx-sg'
+
+  # Security group rules using references instead of CIDR blocks
+  FSxLustreSecurityGroupIngress988:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref FSxLustreSecurityGroup
+      IpProtocol: tcp
+      FromPort: 988
+      ToPort: 988
+      SourceSecurityGroupId: !Ref ClusterSecurityGroup
+      Description: Lustre traffic from cluster nodes
+
+  FSxLustreSecurityGroupIngress1021:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref FSxLustreSecurityGroup
+      IpProtocol: tcp
+      FromPort: 1021
+      ToPort: 1023
+      SourceSecurityGroupId: !Ref ClusterSecurityGroup
+      Description: Lustre traffic from cluster nodes
+
+  # FSx self-referencing rule for inter-FSx communication
+  FSxLustreSecurityGroupIngressSelf988:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref FSxLustreSecurityGroup
+      IpProtocol: tcp
+      FromPort: 988
+      ToPort: 988
+      SourceSecurityGroupId: !Ref FSxLustreSecurityGroup
+      Description: Lustre traffic within FSx
+
+  FSxLustreSecurityGroupIngressSelf1021:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref FSxLustreSecurityGroup
+      IpProtocol: tcp
+      FromPort: 1021
+      ToPort: 1023
+      SourceSecurityGroupId: !Ref FSxLustreSecurityGroup
+      Description: Lustre traffic within FSx
+
+  # IAM Roles
+  PcsInstanceIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "AWSPCS-${AWS::StackName}-role"
+      Description: "AWS IAM role for PCS node group instances"
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Condition:
+              StringEquals:
+                'aws:SecureTransport': 'true'
+        Version: "2012-10-17"
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore"
+      Policies:
+        - PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Action:
+                  - pcs:RegisterComputeNodeGroupInstance
+                Effect: Allow
+                Resource: !Sub "arn:${AWS::Partition}:pcs:${AWS::Region}:${AWS::AccountId}:cluster/*"
+                Condition:
+                  Bool:
+                    'aws:SecureTransport': 'true'
+          PolicyName: PcsRegisterInstancePolicy
+
+  PcsInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+            - !Ref PcsInstanceIamRole
+      InstanceProfileName: !Sub "AWSPCS-${AWS::StackName}"
+
+  # FSx Lustre File System
+  FSxLustreFileSystem:
+    Type: AWS::FSx::FileSystem
+    Properties:
+      FileSystemType: LUSTRE
+      StorageCapacity: !Ref FSxCapacity
+      SubnetIds:
+        - !Ref PrivateSubnetA
+      SecurityGroupIds:
+        - !Ref FSxLustreSecurityGroup
+      KmsKeyId: !If [HasKmsKey, !Ref KmsKeyId, !Ref 'AWS::NoValue']
+      LustreConfiguration:
+        DeploymentType: !If [IsGovCloud, PERSISTENT_1, PERSISTENT_2]
+        PerUnitStorageThroughput: !Ref FSxPerUnitStorageThroughput
+        DataCompressionType: LZ4
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-fsx-lustre'
+        - Key: EncryptionAtRest
+          Value: 'true'
+        - Key: EncryptionInTransit
+          Value: 'true'
+
+  # Launch Templates
+  LoginLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub '${AWS::StackName}-login-lt'
+      LaunchTemplateData:
+        InstanceType: !FindInMap [Architecture, LoginNodeInstances, !Ref NodeArchitecture]
+        KeyName: !Ref KeyName
+        SecurityGroupIds:
+          - !Ref ClusterSecurityGroup
+          - !Ref InboundSshSecurityGroup
+        IamInstanceProfile:
+          Arn: !GetAtt PcsInstanceProfile.Arn
+        MetadataOptions:
+          HttpEndpoint: enabled
+          HttpTokens: required
+          HttpPutResponseHopLimit: 2
+        UserData:
+          Fn::Base64: !Sub |
+            MIME-Version: 1.0
+            Content-Type: multipart/mixed; boundary="==MYBOUNDARY=="
+
+            --==MYBOUNDARY==
+            Content-Type: text/cloud-config; charset="us-ascii"
+            MIME-Version: 1.0
+
+            packages:
+            - amazon-efs-utils
+            
+            runcmd:
+            # If provided, mount FSxL filesystem as /shared
+            - |
+              if [ ! -z "${FSxLustreFileSystem}" ]; then
+                if command -v amazon-linux-extras &>/dev/null; then
+                  amazon-linux-extras install -y lustre=latest
+                else
+                  dnf install -y lustre-client
+                fi
+                mkdir -p /shared
+                mount -t lustre ${FSxLustreFileSystem}.fsx.${AWS::Region}.amazonaws.com@tcp:/${FSxLustreFileSystem} /shared
+                chmod 777 /shared
+              fi
+
+            --==MYBOUNDARY==
+
+  ComputeLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub '${AWS::StackName}-compute-lt'
+      LaunchTemplateData:
+        InstanceType: !FindInMap [Architecture, ComputeNodeInstances, !Ref NodeArchitecture]
+        SecurityGroupIds:
+          - !Ref ClusterSecurityGroup
+        IamInstanceProfile:
+          Arn: !GetAtt PcsInstanceProfile.Arn
+        MetadataOptions:
+          HttpEndpoint: enabled
+          HttpTokens: required
+          HttpPutResponseHopLimit: 2
+        UserData:
+          Fn::Base64: !Sub |
+            MIME-Version: 1.0
+            Content-Type: multipart/mixed; boundary="==MYBOUNDARY=="
+
+            --==MYBOUNDARY==
+            Content-Type: text/cloud-config; charset="us-ascii"
+            MIME-Version: 1.0
+
+            packages:
+            - amazon-efs-utils
+            
+            runcmd:
+            # If provided, mount FSxL filesystem as /shared
+            - |
+              if [ ! -z "${FSxLustreFileSystem}" ]; then
+                if command -v amazon-linux-extras &>/dev/null; then
+                  amazon-linux-extras install -y lustre=latest
+                else
+                  dnf install -y lustre-client
+                fi
+                mkdir -p /shared
+                mount -t lustre ${FSxLustreFileSystem}.fsx.${AWS::Region}.amazonaws.com@tcp:/${FSxLustreFileSystem} /shared
+                chmod 777 /shared
+              fi
+
+            --==MYBOUNDARY==
+
+  # AMI Lookup Lambda Function
+  PcsAMILookupRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: EC2DescribeImages
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeImages
+                Resource: '*'
+                Condition:
+                  Bool:
+                    'aws:SecureTransport': 'true'
+              - Effect: Deny
+                Action: '*'
+                Resource: '*'
+                Condition:
+                  Bool:
+                    'aws:SecureTransport': 'false'
+
+  PcsAMILookupFn:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt PcsAMILookupRole.Arn
+      Code:
+        ZipFile: |
+          import boto3
+          import json
+          import logging
+          import urllib3
+          from botocore.exceptions import ClientError
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          def construct_ami_prefix(os_name, architecture, slurm_version):
+              return f'aws-pcs-sample_ami-{os_name}-{architecture}-slurm-{slurm_version}'
+
+          def get_latest_ami(ami_name_prefix):
+              ec2_client = boto3.client('ec2')
+              filters = [
+                  {'Name': 'name','Values': [f'{ami_name_prefix}*']},
+                  {'Name': 'owner-alias', 'Values': ['amazon']}
+              ]
+              response = ec2_client.describe_images(Filters=filters)
+              ami_list = response['Images']
+              sorted_ami_list = sorted(ami_list, key=lambda x: x['CreationDate'], reverse=True)
+              return sorted_ami_list[0]['ImageId'] if sorted_ami_list else None
+
+          def send_response(event, context, response_status, response_data, physical_resource_id=None):
+              response_body = {
+                  'Status': response_status,
+                  'Reason': f'See CloudWatch Log Stream: {context.log_stream_name}',
+                  'PhysicalResourceId': physical_resource_id or context.log_stream_name,
+                  'StackId': event['StackId'],
+                  'RequestId': event['RequestId'],
+                  'LogicalResourceId': event['LogicalResourceId'],
+                  'NoEcho': False,
+                  'Data': response_data
+              }
+
+              logger.info(f'Response body: {json.dumps(response_body)}')
+
+              http = urllib3.PoolManager()
+              try:
+                  response = http.request(
+                      'PUT',
+                      event['ResponseURL'],
+                      headers={'Content-Type': 'application/json'},
+                      body=json.dumps(response_body).encode('utf-8')
+                  )
+                  logger.info(f'Status code: {response.status}')
+              except Exception as e:
+                  logger.error(f'Failed to send response: {str(e)}')
+                  raise
+
+          def handler(event, context):
+              logger.info(f'Received event: {json.dumps(event)}')
+              
+              try:
+                  properties = event['ResourceProperties']
+                  os_name = properties.get('OperatingSystem')
+                  architecture = properties.get('Architecture')
+                  slurm_version = properties.get('SlurmVersion')
+                  
+                  if not all([os_name, architecture, slurm_version]):
+                      raise ValueError('OperatingSystem, Architecture, and SlurmVersion are required in ResourceProperties')
+
+                  if event['RequestType'] == 'Delete':
+                      send_response(event, context, 'SUCCESS', {})
+                      return
+
+                  ami_name_prefix = construct_ami_prefix(os_name, architecture, slurm_version)
+                  logger.info(f'Looking up AMI with prefix: {ami_name_prefix}')
+                  
+                  ami_id = get_latest_ami(ami_name_prefix)
+                  if not ami_id:
+                      raise ValueError(f'No AMI found matching prefix: {ami_name_prefix}')
+
+                  response_data = {
+                      'AmiId': ami_id,
+                      'AmiPrefix': ami_name_prefix
+                  }
+                  
+                  send_response(event, context, 'SUCCESS', response_data, ami_id)
+
+              except Exception as e:
+                  logger.error(f'Exception: {str(e)}')
+                  send_response(event, context, 'FAILED', {'Error': str(e)})
+                  raise
+      Timeout: 30
+      MemorySize: 128
+
+  PcsSampleAmi:
+    Type: Custom::AMILookup
+    Properties:
+      ServiceToken: !GetAtt PcsAMILookupFn.Arn
+      OperatingSystem: 'amzn2'
+      Architecture: !FindInMap [Architecture, AmiArchParameter, !Ref NodeArchitecture]
+      SlurmVersion: !Ref SlurmVersion
+
+  # PCS Cluster
+  PCSCluster:
+    Type: AWS::PCS::Cluster
+    Properties:
+      Name: !Sub '${AWS::StackName}'
+      Size: SMALL
+      Scheduler:
+        Type: SLURM
+        Version: !Ref SlurmVersion
+      Networking:
+        SubnetIds:
+          - !Ref PrivateSubnetA
+        SecurityGroupIds:
+          - !Ref ClusterSecurityGroup
+
+  # Compute Node Groups
+  PCSNodeGroupLogin:
+    Type: AWS::PCS::ComputeNodeGroup
+    Properties:
+      ClusterId: !GetAtt [PCSCluster, Id]
+      Name: login
+      ScalingConfiguration:
+        MinInstanceCount: 1
+        MaxInstanceCount: 1
+      IamInstanceProfileArn: !GetAtt [PcsInstanceProfile, Arn]
+      CustomLaunchTemplate:
+        TemplateId: !Ref LoginLaunchTemplate
+        Version: 1
+      SubnetIds:
+        - !Ref PublicSubnetA
+      AmiId: !GetAtt [PcsSampleAmi, AmiId]
+      InstanceConfigs:
+        - InstanceType: !FindInMap [Architecture, LoginNodeInstances, !Ref NodeArchitecture]
+
+  PCSNodeGroupCompute:
+    Type: AWS::PCS::ComputeNodeGroup
+    Properties:
+      ClusterId: !GetAtt [PCSCluster, Id]
+      Name: compute-1
+      ScalingConfiguration:
+        MinInstanceCount: 0
+        MaxInstanceCount: 4
+      IamInstanceProfileArn: !GetAtt [PcsInstanceProfile, Arn]
+      CustomLaunchTemplate:
+        TemplateId: !Ref ComputeLaunchTemplate
+        Version: 1
+      SubnetIds:
+        - !Ref PrivateSubnetA
+      AmiId: !GetAtt [PcsSampleAmi, AmiId]
+      InstanceConfigs:
+        - InstanceType: !FindInMap [Architecture, ComputeNodeInstances, !Ref NodeArchitecture]
+
+  # PCS Queue
+  PCSQueueCompute:
+    Type: AWS::PCS::Queue
+    Properties:
+      ClusterId: !GetAtt [PCSCluster, Id]
+      Name: demo
+      ComputeNodeGroupConfigurations:
+        - ComputeNodeGroupId: !GetAtt [PCSNodeGroupCompute, Id]
+
+Outputs:
+  ClusterId:
+    Description: The Id of the PCS cluster
+    Value: !GetAtt [PCSCluster, Id]
+  VpcId:
+    Description: VPC ID
+    Value: !Ref VPC
+  PublicSubnetId:
+    Description: Public Subnet ID
+    Value: !Ref PublicSubnetA
+  PrivateSubnetId:
+    Description: Private Subnet ID
+    Value: !Ref PrivateSubnetA
+  FSxFileSystemId:
+    Description: FSx Lustre File System ID
+    Value: !Ref FSxLustreFileSystem
+  ClusterSecurityGroupId:
+    Description: Cluster Security Group ID
+    Value: !Ref ClusterSecurityGroup

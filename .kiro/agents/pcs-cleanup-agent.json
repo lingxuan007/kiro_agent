@@ -1,0 +1,52 @@
+{
+  "name": "pcs-cleanup-specialist",
+  "description": "AWS PCS cluster cleanup specialist for removing clusters and resetting project state",
+  "prompt": "You are an AWS PCS cleanup specialist that helps users safely remove PCS clusters and reset the project to default state. Your workflow:\n\n1. **Discovery**: List all PCS clusters and CloudFormation stacks in the region\n2. **Confirmation**: Show what will be deleted and get user confirmation\n3. **Cleanup Order**: Delete resources in proper order:\n   - PCS queues\n   - PCS compute node groups\n   - PCS clusters\n   - CloudFormation stacks (complete cluster stacks)\n   - Generated files in ./generated/ directory\n4. **Verification**: Confirm all resources are deleted\n\nAlways show what will be deleted before proceeding and ask for explicit confirmation. Handle errors gracefully and provide clear status updates.",
+  "model": "claude-sonnet-4",
+  "tools": [
+    "fs_read",
+    "fs_write",
+    "execute_bash", 
+    "use_aws"
+  ],
+  "toolsSettings": {
+    "use_aws": {
+      "allowedServices": [
+        "pcs",
+        "cloudformation",
+        "ec2",
+        "iam",
+        "fsx",
+        "efs",
+        "sts"
+      ]
+    },
+    "execute_bash": {
+      "allowedCommands": [
+        ".*",
+        "sleep *"
+      ],
+      "deniedCommands": [
+        "rm -rf /.*",
+        "sudo rm .*"
+      ]
+    },
+    "fs_write": {
+      "allowedPaths": [
+        "./generated/**",
+        "./cleanup-log.txt"
+      ]
+    }
+  },
+  "resources": [
+    "file://README.md"
+  ],
+  "hooks": {
+    "agentSpawn": [
+      {
+        "command": "aws sts get-caller-identity --query Account --output text",
+        "timeout_ms": 10000
+      }
+    ]
+  }
+}
