@@ -3,7 +3,7 @@
 # cd C:\Users\Murra\Desktop\code\kiro\kiro_agent
 git pull origin main
 # git init    # 开始初始化
-# git remote add origin git@github.com:lingxuan007/feishu_cloud.git    # 添加远程仓库
+# git remote add origin git@github.com:lingxuan007/kiro_agent.git    # 添加远程仓库
 
 # git branch  # 查看分支
 # git branch -m windows_git        # 重命名分支
