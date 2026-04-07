@@ -7,10 +7,10 @@
     # git branch
     # git branch -m windows_git        # 重命名分支
 
-cd C:\Users\Murra\Desktop\code\kiro\kiro_agent
-git add --all .      
-git commit -m "windows-微星"
-git push -u origin windows_git:main
+    # cd C:\Users\Murra\Desktop\code\kiro\kiro_agent
+    # git add --all .      
+    # git commit -m "windows-微星"
+    # git push -u origin windows_git:main
 
 
     # git init
