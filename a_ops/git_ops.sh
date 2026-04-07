@@ -28,8 +28,8 @@
     # git branch
     # git branch -m mac_pro_tq_git        # 重命名分支
 
-cd C:\Users\Murra\Desktop\code\kiro\kiro_agent
-git add --all .      
+cd /Users/huanglingxuan/Documents/code/kiro/kiro_agent
+git add --all .
 git commit -m "mac_pro_tq_git"
 git push -u origin mac_pro_tq_git:main
 
